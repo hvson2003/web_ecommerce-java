@@ -19,10 +19,11 @@ import redis.clients.jedis.Jedis;
 public class CartServiceImpl implements CartService {
 
 	@Override
-	public String addProductToCart(String userId, String prodId, int prodQty) {
+	public synchronized String addProductToCart(String userId, String prodId, int prodQty) {
 		String status = "Failed to Add into Cart";
 
 		if (userId == null) {
+			// Handle when user didn't log in
 			userId = UUID.randomUUID().toString();
 			System.out.println(userId);
 
@@ -50,20 +51,36 @@ public class CartServiceImpl implements CartService {
 				ps = con.prepareStatement("SELECT * FROM usercart WHERE username=? AND prodid=?");
 				ps.setString(1, userId);
 				ps.setString(2, prodId);
-
 				rs = ps.executeQuery();
 
+				int cartQuantity = 0;
 				if (rs.next()) {
-					int cartQuantity = rs.getInt("quantity");
-					ProductBean product = new ProductServiceImpl().getProductDetails(prodId);
-					int availableQty = product.getProdQuantity();
-					prodQty += cartQuantity;
+					cartQuantity = rs.getInt("quantity");
+				}
 
-					if (availableQty < prodQty) {
-						status = updateProductToCart(userId, prodId, availableQty);
-						status = "Only " + availableQty + " of " + product.getProdName() + " are available in stock!";
+				ProductBean product = new ProductServiceImpl().getProductDetails(prodId);
+				int availableQty = product.getProdQuantity();
+
+				int newCartQty = cartQuantity + prodQty;
+
+				if (availableQty < newCartQty) {
+					if (availableQty == 0) {
+						status = "Product is Out of Stock!";
 					} else {
-						status = updateProductToCart(userId, prodId, prodQty);
+						updateProductToCart(userId, prodId, availableQty);
+						status = "Only " + availableQty + " of " + product.getProdName() + " are available in stock!";
+					}
+				} else {
+					if (cartQuantity > 0) {
+						status = updateProductToCart(userId, prodId, newCartQty);
+					} else {
+						PreparedStatement insertPs = con.prepareStatement(
+								"INSERT INTO usercart (username, prodid, quantity) VALUES (?, ?, ?)");
+						insertPs.setString(1, userId);
+						insertPs.setString(2, prodId);
+						insertPs.setInt(3, prodQty);
+						insertPs.executeUpdate();
+						status = "Product added to cart!";
 					}
 				}
 			} catch (SQLException e) {

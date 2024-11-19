@@ -52,9 +52,10 @@ public class AddtoCart extends HttpServlet {
 
 			String prodId = request.getParameter("pid");
 			int pQty = Integer.parseInt(request.getParameter("pqty"));
-			cartItems.put(prodId, cartItems.getOrDefault(prodId, 0) + pQty);
-
-			redisUtil.saveCart(cartKey, cartItems);
+			synchronized (redisUtil) {
+				cartItems.put(prodId, cartItems.getOrDefault(prodId, 0) + pQty);
+				redisUtil.saveCart(cartKey, cartItems);
+			}
 			redisUtil.close();
 
 			pw.println("<script>document.getElementById('message').innerHTML='Product added to your temporary cart!'</script>");
