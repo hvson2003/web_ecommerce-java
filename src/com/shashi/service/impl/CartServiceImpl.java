@@ -6,12 +6,15 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 import com.shashi.beans.CartBean;
-import com.shashi.beans.DemandBean;
 import com.shashi.beans.ProductBean;
 import com.shashi.service.CartService;
 import com.shashi.utility.DBUtil;
+import com.shashi.utility.RedisUtil;
+import redis.clients.jedis.Jedis;
 
 public class CartServiceImpl implements CartService {
 
@@ -19,105 +22,111 @@ public class CartServiceImpl implements CartService {
 	public String addProductToCart(String userId, String prodId, int prodQty) {
 		String status = "Failed to Add into Cart";
 
-		Connection con = DBUtil.provideConnection();
+		if (userId == null) {
+			userId = UUID.randomUUID().toString();
+			System.out.println(userId);
 
-		PreparedStatement ps = null;
-		PreparedStatement ps2 = null;
-		ResultSet rs = null;
+			RedisUtil redisUtil = new RedisUtil();
+			Jedis jedis = redisUtil.getJedis();
 
-		try {
+			String cartKey = "cart:" + userId;
+			String cartItem = jedis.hget(cartKey, prodId);
 
-			ps = con.prepareStatement("select * from usercart where username=? and prodid=?");
-
-			ps.setString(1, userId);
-			ps.setString(2, prodId);
-
-			rs = ps.executeQuery();
-
-			if (rs.next()) {
-
-				int cartQuantity = rs.getInt("quantity");
-
-				ProductBean product = new ProductServiceImpl().getProductDetails(prodId);
-
-				int availableQty = product.getProdQuantity();
-
-				prodQty += cartQuantity;
-				//
-				if (availableQty < prodQty) {
-
-					status = updateProductToCart(userId, prodId, availableQty);
-
-					status = "Only " + availableQty + " no of " + product.getProdName()
-							+ " are available in the shop! So we are adding only " + availableQty
-							+ " no of that item into Your Cart" + "";
-
-					DemandBean demandBean = new DemandBean(userId, product.getProdId(), prodQty - availableQty);
-
-					DemandServiceImpl demand = new DemandServiceImpl();
-
-					boolean flag = demand.addProduct(demandBean);
-
-					if (flag)
-						status += "<br/>Later, We Will Mail You when " + product.getProdName()
-								+ " will be available into the Store!";
-
-				} else {
-					status = updateProductToCart(userId, prodId, prodQty);
-
-				}
+			if (cartItem != null) {
+				int existingQty = Integer.parseInt(cartItem);
+				prodQty += existingQty;
 			}
 
-		} catch (SQLException e) {
-			status = "Error: " + e.getMessage();
-			e.printStackTrace();
-		}
+			jedis.hset(cartKey, prodId, String.valueOf(prodQty));
+			status = "Product added to temporary cart!";
 
-		DBUtil.closeConnection(con);
-		DBUtil.closeConnection(ps);
-		DBUtil.closeConnection(rs);
-		DBUtil.closeConnection(ps2);
+			redisUtil.close();
+		} else {
+			Connection con = DBUtil.provideConnection();
+			PreparedStatement ps = null;
+			ResultSet rs = null;
+
+			try {
+				ps = con.prepareStatement("SELECT * FROM usercart WHERE username=? AND prodid=?");
+				ps.setString(1, userId);
+				ps.setString(2, prodId);
+
+				rs = ps.executeQuery();
+
+				if (rs.next()) {
+					int cartQuantity = rs.getInt("quantity");
+					ProductBean product = new ProductServiceImpl().getProductDetails(prodId);
+					int availableQty = product.getProdQuantity();
+					prodQty += cartQuantity;
+
+					if (availableQty < prodQty) {
+						status = updateProductToCart(userId, prodId, availableQty);
+						status = "Only " + availableQty + " of " + product.getProdName() + " are available in stock!";
+					} else {
+						status = updateProductToCart(userId, prodId, prodQty);
+					}
+				}
+			} catch (SQLException e) {
+				status = "Error: " + e.getMessage();
+				e.printStackTrace();
+			} finally {
+				DBUtil.closeConnection(con);
+				DBUtil.closeConnection(ps);
+				DBUtil.closeConnection(rs);
+			}
+		}
 
 		return status;
 	}
 
 	@Override
+	public String updateProductToCart(String userId, String prodId, int prodQty) {
+		return "";
+	}
+
+	@Override
 	public List<CartBean> getAllCartItems(String userId) {
-		List<CartBean> items = new ArrayList<CartBean>();
+		List<CartBean> items = new ArrayList<>();
 
-		Connection con = DBUtil.provideConnection();
+		if (userId == null) {
+			RedisUtil redisUtil = new RedisUtil();
+			Jedis jedis = redisUtil.getJedis();
 
-		PreparedStatement ps = null;
-		ResultSet rs = null;
+			String cartKey = "cart:" + userId;
+			Map<String, String> cartItems = jedis.hgetAll(cartKey);
 
-		try {
-
-			ps = con.prepareStatement("select * from usercart where username=?");
-
-			ps.setString(1, userId);
-
-			rs = ps.executeQuery();
-
-			while (rs.next()) {
+			for (Map.Entry<String, String> entry : cartItems.entrySet()) {
 				CartBean cart = new CartBean();
-
-				cart.setUserId(rs.getString("username"));
-				cart.setProdId(rs.getString("prodid"));
-				cart.setQuantity(Integer.parseInt(rs.getString("quantity")));
-
+				cart.setProdId(entry.getKey());
+				cart.setQuantity(Integer.parseInt(entry.getValue()));
 				items.add(cart);
-
 			}
 
-		} catch (SQLException e) {
+			redisUtil.close();
+		} else {
+			Connection con = DBUtil.provideConnection();
+			PreparedStatement ps = null;
+			ResultSet rs = null;
+			try {
+				ps = con.prepareStatement("SELECT * FROM usercart WHERE username=?");
+				ps.setString(1, userId);
+				rs = ps.executeQuery();
 
-			e.printStackTrace();
+				while (rs.next()) {
+					CartBean cart = new CartBean();
+					cart.setUserId(rs.getString("username"));
+					cart.setProdId(rs.getString("prodid"));
+					cart.setQuantity(rs.getInt("quantity"));
+					items.add(cart);
+				}
+			} catch (SQLException e) {
+				e.printStackTrace();
+			} finally {
+				DBUtil.closeConnection(con);
+				DBUtil.closeConnection(ps);
+				DBUtil.closeConnection(rs);
+			}
 		}
-
-		DBUtil.closeConnection(con);
-		DBUtil.closeConnection(ps);
-		DBUtil.closeConnection(rs);
-
 		return items;
 	}
 
@@ -125,31 +134,41 @@ public class CartServiceImpl implements CartService {
 	public int getCartCount(String userId) {
 		int count = 0;
 
-		Connection con = DBUtil.provideConnection();
+		if (userId == null) {
+			// Người dùng chưa đăng nhập
+			RedisUtil redisUtil = new RedisUtil();
+			Jedis jedis = redisUtil.getJedis();
 
-		PreparedStatement ps = null;
+			String cartKey = "cart:" + userId;
+			Map<String, String> cartItems = jedis.hgetAll(cartKey);
 
-		ResultSet rs = null;
+			for (String quantity : cartItems.values()) {
+				count += Integer.parseInt(quantity);
+			}
 
-		try {
-			ps = con.prepareStatement("select sum(quantity) from usercart where username=?");
+			redisUtil.close();
+		} else {
+			// Người dùng đã đăng nhập
+			Connection con = DBUtil.provideConnection();
+			PreparedStatement ps = null;
+			ResultSet rs = null;
 
-			ps.setString(1, userId);
+			try {
+				ps = con.prepareStatement("SELECT SUM(quantity) FROM usercart WHERE username=?");
+				ps.setString(1, userId);
+				rs = ps.executeQuery();
 
-			rs = ps.executeQuery();
-
-			if (rs.next() && !rs.wasNull())
-				count = rs.getInt(1);
-
-		} catch (SQLException e) {
-
-			e.printStackTrace();
+				if (rs.next()) {
+					count = rs.getInt(1);
+				}
+			} catch (SQLException e) {
+				e.printStackTrace();
+			} finally {
+				DBUtil.closeConnection(con);
+				DBUtil.closeConnection(ps);
+				DBUtil.closeConnection(rs);
+			}
 		}
-
-		DBUtil.closeConnection(con);
-		DBUtil.closeConnection(ps);
-		DBUtil.closeConnection(rs);
-
 		return count;
 	}
 
@@ -157,70 +176,44 @@ public class CartServiceImpl implements CartService {
 	public String removeProductFromCart(String userId, String prodId) {
 		String status = "Product Removal Failed";
 
-		Connection con = DBUtil.provideConnection();
+		if (userId == null) {
+			RedisUtil redisUtil = new RedisUtil();
+			Jedis jedis = redisUtil.getJedis();
 
-		PreparedStatement ps = null;
-		PreparedStatement ps2 = null;
-		ResultSet rs = null;
+			String cartKey = "cart:" + userId;
 
-		try {
+			jedis.hdel(cartKey, prodId);
+			status = "Product successfully removed from temporary cart!";
 
-			ps = con.prepareStatement("select * from usercart where username=? and prodid=?");
+			redisUtil.close();
+		} else {
+			Connection con = DBUtil.provideConnection();
+			PreparedStatement ps = null;
+			ResultSet rs = null;
 
-			ps.setString(1, userId);
-			ps.setString(2, prodId);
+			try {
+				ps = con.prepareStatement("select * from usercart where username=? and prodid=?");
+				ps.setString(1, userId);
+				ps.setString(2, prodId);
+				rs = ps.executeQuery();
 
-			rs = ps.executeQuery();
+				if (rs.next()) {
+					ps = con.prepareStatement("delete from usercart where username=? and prodid=?");
+					ps.setString(1, userId);
+					ps.setString(2, prodId);
 
-			if (rs.next()) {
-
-				int prodQuantity = rs.getInt("quantity");
-
-				prodQuantity -= 1;
-
-				if (prodQuantity > 0) {
-					ps2 = con.prepareStatement("update usercart set quantity=? where username=? and prodid=?");
-
-					ps2.setInt(1, prodQuantity);
-
-					ps2.setString(2, userId);
-
-					ps2.setString(3, prodId);
-
-					int k = ps2.executeUpdate();
-
+					int k = ps.executeUpdate();
 					if (k > 0)
-						status = "Product Successfully removed from the Cart!";
-				} else if (prodQuantity <= 0) {
-
-					ps2 = con.prepareStatement("delete from usercart where username=? and prodid=?");
-
-					ps2.setString(1, userId);
-
-					ps2.setString(2, prodId);
-
-					int k = ps2.executeUpdate();
-
-					if (k > 0)
-						status = "Product Successfully removed from the Cart!";
+						status = "Product successfully removed from cart!";
 				}
-
-			} else {
-
-				status = "Product Not Available in the cart!";
-
+			} catch (SQLException e) {
+				e.printStackTrace();
+			} finally {
+				DBUtil.closeConnection(con);
+				DBUtil.closeConnection(ps);
+				DBUtil.closeConnection(rs);
 			}
-
-		} catch (SQLException e) {
-			status = "Error: " + e.getMessage();
-			e.printStackTrace();
 		}
-
-		DBUtil.closeConnection(con);
-		DBUtil.closeConnection(ps);
-		DBUtil.closeConnection(rs);
-		DBUtil.closeConnection(ps2);
-
 		return status;
 	}
 
@@ -234,7 +227,6 @@ public class CartServiceImpl implements CartService {
 		ResultSet rs = null;
 
 		try {
-
 			ps = con.prepareStatement("delete from usercart where username=? and prodid=?");
 			ps.setString(1, userId);
 			ps.setString(2, prodId);
@@ -254,83 +246,6 @@ public class CartServiceImpl implements CartService {
 		DBUtil.closeConnection(rs);
 
 		return flag;
-	}
-
-	@Override
-	public String updateProductToCart(String userId, String prodId, int prodQty) {
-
-		String status = "Failed to Add into Cart";
-
-		Connection con = DBUtil.provideConnection();
-
-		PreparedStatement ps = null;
-		PreparedStatement ps2 = null;
-		ResultSet rs = null;
-
-		try {
-
-			ps = con.prepareStatement("select * from usercart where username=? and prodid=?");
-
-			ps.setString(1, userId);
-			ps.setString(2, prodId);
-
-			rs = ps.executeQuery();
-
-			if (rs.next()) {
-
-				if (prodQty > 0) {
-					ps2 = con.prepareStatement("update usercart set quantity=? where username=? and prodid=?");
-
-					ps2.setInt(1, prodQty);
-
-					ps2.setString(2, userId);
-
-					ps2.setString(3, prodId);
-
-					int k = ps2.executeUpdate();
-
-					if (k > 0)
-						status = "Product Successfully Updated to Cart!";
-				} else if (prodQty == 0) {
-					ps2 = con.prepareStatement("delete from usercart where username=? and prodid=?");
-
-					ps2.setString(1, userId);
-
-					ps2.setString(2, prodId);
-
-					int k = ps2.executeUpdate();
-
-					if (k > 0)
-						status = "Product Successfully Updated in Cart!";
-				}
-			} else {
-
-				ps2 = con.prepareStatement("insert into usercart values(?,?,?)");
-
-				ps2.setString(1, userId);
-
-				ps2.setString(2, prodId);
-
-				ps2.setInt(3, prodQty);
-
-				int k = ps2.executeUpdate();
-
-				if (k > 0)
-					status = "Product Successfully Updated to Cart!";
-
-			}
-
-		} catch (SQLException e) {
-			status = "Error: " + e.getMessage();
-			e.printStackTrace();
-		}
-
-		DBUtil.closeConnection(con);
-		DBUtil.closeConnection(ps);
-		DBUtil.closeConnection(rs);
-		DBUtil.closeConnection(ps2);
-
-		return status;
 	}
 
 	public int getProductCount(String userId, String prodId) {
